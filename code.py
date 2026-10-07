@@ -105,7 +105,7 @@ cs = digitalio.DigitalInOut(board.GP13)
 sdcard = sdcardio.SDCard(spi, cs)
 vfs = storage.VfsFat(sdcard)
 
-storage.mount(vfs, "/sd")
+storage.mount(vfs, "/sd", readonly=True)
 
 print("SD card mounted.")
 
@@ -131,7 +131,7 @@ else:
 config = {}
 
 profile_order = []
-fn_button = 20
+fn_button = 17
 
 active_profile_id = None
 active_profile_name = None
@@ -150,11 +150,37 @@ active_macros = {
 # --------------------------------------------------
 
 def load_json(path):
-    with open(path, "r") as file:
-        return json.load(file)
+    """
+    Read JSON from the SD card.
+
+    Retry briefly because the host computer may have
+    only just finished writing the file.
+    """
+
+    last_error = None
+
+    for attempt in range(3):
+
+        try:
+            with open(path, "r") as file:
+                return json.load(file)
+
+        except Exception as error:
+            last_error = error
+
+            # Brief pause before trying again
+            time.sleep(0.1)
+
+    raise last_error
 
 
 def check_schema(data, path):
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            "{} must contain a JSON object".format(path)
+        )
+
     version = data.get("schema_version")
 
     if version != SUPPORTED_SCHEMA_VERSION:
@@ -167,42 +193,77 @@ def check_schema(data, path):
 
 
 # --------------------------------------------------
-# Global configuration
+# Validate global configuration
 # --------------------------------------------------
 
-def load_config():
-
-    global config
-    global profile_order
-    global fn_button
+def read_config():
 
     data = load_json(CONFIG_PATH)
 
-    check_schema(data, CONFIG_PATH)
+    check_schema(
+        data,
+        CONFIG_PATH
+    )
 
-    profile_order = data.get(
+    new_profile_order = data.get(
         "profile_order",
         []
     )
 
-    if not profile_order:
+    if not isinstance(
+        new_profile_order,
+        list
+    ):
+        raise ValueError(
+            "profile_order must be a list"
+        )
+
+    if not new_profile_order:
         raise ValueError(
             "profile_order cannot be empty"
         )
 
-    fn_button = int(
-        data.get("fn_button", 20)
+    for profile_id in new_profile_order:
+
+        if not isinstance(
+            profile_id,
+            str
+        ):
+            raise ValueError(
+                "Every profile ID must be a string"
+            )
+
+    new_fn_button = int(
+        data.get(
+            "fn_button",
+            20
+        )
     )
 
-    if fn_button < 1 or fn_button > 20:
+    if (
+        new_fn_button < 1
+        or new_fn_button > 20
+    ):
         raise ValueError(
             "fn_button must be between 1 and 20"
         )
 
-    config = data
+    default_profile = data.get(
+        "default_profile",
+        new_profile_order[0]
+    )
 
-    print("Profiles:", profile_order)
-    print("Fn button:", fn_button)
+    if default_profile not in new_profile_order:
+        raise ValueError(
+            "default_profile must appear "
+            "in profile_order"
+        )
+
+    return (
+        data,
+        new_profile_order,
+        new_fn_button,
+    )
 
 
 # --------------------------------------------------
@@ -228,29 +289,30 @@ def select_layout(name):
         if layout_jis is None:
             raise RuntimeError(
                 "JIS layout requested, but "
-                "keyboard_layout_jp.py is not installed."
+                "keyboard_layout_jp.py "
+                "is not installed."
             )
 
         return "jis", layout_jis
 
     raise ValueError(
-        "Unknown keyboard layout: {}".format(name)
+        "Unknown keyboard layout: {}".format(
+            name
+        )
     )
 
 
 # --------------------------------------------------
-# Profile loading
+# Read and validate a profile
 # --------------------------------------------------
 
-def load_profile(profile_id):
+def read_profile(profile_id):
 
-    global active_profile_id
-    global active_profile_name
-    global active_layout_name
-    global active_layout
-    global active_macros
-
-    profile_id = profile_id.strip().lower()
+    profile_id = (
+        profile_id
+        .strip()
+        .lower()
+    )
 
     path = "{}/{}.json".format(
         PROFILE_DIR,
@@ -259,12 +321,25 @@ def load_profile(profile_id):
 
     data = load_json(path)
 
-    check_schema(data, path)
+    check_schema(
+        data,
+        path
+    )
 
     profile_info = data.get(
         "profile",
         {}
     )
+
+    if not isinstance(
+        profile_info,
+        dict
+    ):
+        raise ValueError(
+            "{}: profile must be an object".format(
+                path
+            )
+        )
 
     profile_name = profile_info.get(
         "name",
@@ -279,7 +354,9 @@ def load_profile(profile_id):
     (
         selected_layout_name,
         selected_layout,
-    ) = select_layout(layout_name)
+    ) = select_layout(
+        layout_name
+    )
 
     normal_macros = data.get(
         "normal",
@@ -291,22 +368,251 @@ def load_profile(profile_id):
         {}
     )
 
-    active_profile_id = profile_id
-    active_profile_name = profile_name
+    if not isinstance(
+        normal_macros,
+        dict
+    ):
+        raise ValueError(
+            "{}: normal must be an object".format(
+                path
+            )
+        )
 
-    active_layout_name = selected_layout_name
-    active_layout = selected_layout
+    if not isinstance(
+        fn_macros,
+        dict
+    ):
+        raise ValueError(
+            "{}: fn must be an object".format(
+                path
+            )
+        )
 
-    active_macros = {
-        "normal": normal_macros,
-        "fn": fn_macros,
+    return {
+        "id": profile_id,
+        "name": profile_name,
+        "layout_name": selected_layout_name,
+        "layout": selected_layout,
+        "macros": {
+            "normal": normal_macros,
+            "fn": fn_macros,
+        },
     }
 
+
+# --------------------------------------------------
+# Apply an already validated profile
+# --------------------------------------------------
+
+def apply_profile(profile_data):
+
+    global active_profile_id
+    global active_profile_name
+    global active_layout_name
+    global active_layout
+    global active_macros
+
+    active_profile_id = (
+        profile_data["id"]
+    )
+
+    active_profile_name = (
+        profile_data["name"]
+    )
+
+    active_layout_name = (
+        profile_data["layout_name"]
+    )
+
+    active_layout = (
+        profile_data["layout"]
+    )
+
+    active_macros = (
+        profile_data["macros"]
+    )
+
     print("------------------------------")
-    print("Profile:", active_profile_name)
-    print("Profile ID:", active_profile_id)
-    print("Layout:", active_layout_name)
+    print(
+        "Profile:",
+        active_profile_name
+    )
+    print(
+        "Profile ID:",
+        active_profile_id
+    )
+    print(
+        "Layout:",
+        active_layout_name
+    )
     print("------------------------------")
+
+
+# --------------------------------------------------
+# Safely load one profile
+# --------------------------------------------------
+
+def load_profile(profile_id):
+
+    try:
+
+        profile_data = read_profile(
+            profile_id
+        )
+
+    except Exception as error:
+
+        print("------------------------------")
+        print("PROFILE LOAD FAILED")
+        print(
+            "Profile:",
+            profile_id
+        )
+        print(
+            "Error:",
+            error
+        )
+        print(
+            "Keeping current profile."
+        )
+        print("------------------------------")
+
+        return False
+
+    apply_profile(
+        profile_data
+    )
+
+    return True
+
+
+# --------------------------------------------------
+# Initial configuration load
+# --------------------------------------------------
+
+def load_config():
+
+    global config
+    global profile_order
+    global fn_button
+
+    (
+        new_config,
+        new_profile_order,
+        new_fn_button,
+    ) = read_config()
+
+    config = new_config
+    profile_order = new_profile_order
+    fn_button = new_fn_button
+
+    print(
+        "Profiles:",
+        profile_order
+    )
+
+    print(
+        "Fn button:",
+        fn_button
+    )
+
+
+# --------------------------------------------------
+# Safe configuration reload
+# --------------------------------------------------
+
+def reload_configuration():
+
+    global config
+    global profile_order
+    global fn_button
+
+    print("------------------------------")
+    print("Reloading configuration...")
+
+    try:
+
+        # ------------------------------------------
+        # Read new global config WITHOUT applying it
+        # ------------------------------------------
+
+        (
+            new_config,
+            new_profile_order,
+            new_fn_button,
+        ) = read_config()
+
+        # ------------------------------------------
+        # Determine which profile should stay active
+        # ------------------------------------------
+
+        if (
+            active_profile_id is not None
+            and active_profile_id
+            in new_profile_order
+        ):
+
+            target_profile = (
+                active_profile_id
+            )
+
+        else:
+
+            target_profile = (
+                new_config[
+                    "default_profile"
+                ]
+            )
+
+        # ------------------------------------------
+        # Read and validate profile BEFORE
+        # changing any runtime state
+        # ------------------------------------------
+
+        new_profile_data = read_profile(
+            target_profile
+        )
+
+    except Exception as error:
+
+        print("RELOAD FAILED")
+        print(
+            "Error:",
+            error
+        )
+        print(
+            "Keeping previous configuration."
+        )
+        print("------------------------------")
+
+        return False
+
+    # ----------------------------------------------
+    # Everything validated successfully.
+    # NOW commit the new state.
+    # ----------------------------------------------
+
+    config = new_config
+
+    profile_order = (
+        new_profile_order
+    )
+
+    fn_button = (
+        new_fn_button
+    )
+
+    apply_profile(
+        new_profile_data
+    )
+
+    print(
+        "Configuration reloaded successfully."
+    )
+
+    print("------------------------------")
+
+    return True
 
 
 # --------------------------------------------------
@@ -348,33 +654,6 @@ def previous_profile():
     load_profile(
         profile_order[index]
     )
-
-
-def reload_configuration():
-
-    current_profile = active_profile_id
-
-    load_config()
-
-    if (
-        current_profile is not None
-        and current_profile in profile_order
-    ):
-        target_profile = current_profile
-
-    else:
-        target_profile = config.get(
-            "default_profile",
-            profile_order[0]
-        )
-
-        if target_profile not in profile_order:
-            target_profile = profile_order[0]
-
-    load_profile(target_profile)
-
-    print("Configuration reloaded.")
-
 
 # --------------------------------------------------
 # Ducky-style key names
