@@ -1,4 +1,5 @@
 # sd-macropad
+Code, documentation, and 3D files for a hand-wired, 4x5 macropad. 
 
 ## Hardware 
 
