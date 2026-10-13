@@ -742,6 +742,212 @@ def send_key_command(command):
     if keycodes:
         keyboard.send(*keycodes)
 
+# --------------------------------------------------
+# Print current keyboard layout
+# --------------------------------------------------
+
+LAYOUT_CELL_WIDTH = 20
+
+
+def fit_layout_text(text):
+
+    text = str(text)
+
+    if len(text) > LAYOUT_CELL_WIDTH:
+        text = (
+            text[:LAYOUT_CELL_WIDTH - 3]
+            + "..."
+        )
+
+    padding = (
+        LAYOUT_CELL_WIDTH
+        - len(text)
+    )
+
+    return text + (" " * padding)
+
+
+def get_button_display_lines(
+    button_number,
+    layer
+):
+
+    # The Fn button is reserved as a modifier.
+    if button_number == fn_button:
+        return ["FN"]
+
+    layer_macros = active_macros.get(
+        layer,
+        {}
+    )
+
+    commands = layer_macros.get(
+        str(button_number)
+    )
+
+    if commands is None:
+        return [""]
+
+    if not isinstance(commands, list):
+        return ["INVALID MACRO"]
+
+    lines = []
+
+    for command in commands:
+
+        if isinstance(command, str):
+            lines.append(command)
+        else:
+            lines.append(str(command))
+
+    if not lines:
+        lines.append("")
+
+    return lines
+
+
+def type_output_line(text=""):
+
+    active_layout.write(text)
+    keyboard.send(Keycode.ENTER)
+
+    # Small delay helps prevent dropped characters
+    # when sending a lot of text quickly.
+    time.sleep(0.01)
+
+
+def print_layer_layout(layer):
+
+    layer = layer.lower()
+
+    if layer not in (
+        "normal",
+        "fn",
+    ):
+        print(
+            "Unknown layout layer:",
+            layer
+        )
+        return
+
+    type_output_line(
+        "Profile: {}".format(
+            active_profile_name
+        )
+    )
+
+    type_output_line(
+        "Layout: {}".format(
+            active_layout_name.upper()
+        )
+    )
+
+    if layer == "normal":
+        layer_name = "Normal"
+    else:
+        layer_name = "Fn"
+
+    type_output_line(
+        "Layer: {}".format(
+            layer_name
+        )
+    )
+
+    type_output_line()
+
+    border = (
+        "+"
+        + (
+            "-" * LAYOUT_CELL_WIDTH
+            + "+"
+        ) * 4
+    )
+
+    type_output_line(border)
+
+    for matrix_row in BUTTON_MAP:
+
+        cells = []
+
+        for button_number in matrix_row:
+
+            cells.append(
+                get_button_display_lines(
+                    button_number,
+                    layer
+                )
+            )
+
+        row_height = max(
+            len(cell)
+            for cell in cells
+        )
+
+        for line_index in range(
+            row_height
+        ):
+
+            output = "|"
+
+            for cell in cells:
+
+                if line_index < len(cell):
+                    text = cell[line_index]
+                else:
+                    text = ""
+
+                output += (
+                    fit_layout_text(text)
+                    + "|"
+                )
+
+            type_output_line(output)
+
+        type_output_line(border)
+
+
+def print_keyboard_layout(
+    requested_layer=""
+):
+
+    requested_layer = (
+        requested_layer
+        .strip()
+        .lower()
+    )
+
+    if requested_layer == "normal":
+
+        print_layer_layout(
+            "normal"
+        )
+
+    elif requested_layer == "fn":
+
+        print_layer_layout(
+            "fn"
+        )
+
+    elif requested_layer == "":
+
+        # No argument: show everything.
+        print_layer_layout(
+            "normal"
+        )
+
+        type_output_line()
+        type_output_line()
+
+        print_layer_layout(
+            "fn"
+        )
+
+    else:
+
+        print(
+            "PRINT_LAYOUT expects "
+            "'normal', 'fn', or no argument."
+        )
 
 # --------------------------------------------------
 # Macropad-specific commands
@@ -784,6 +990,10 @@ def run_system_command(argument):
 
     elif command == "RELOAD":
         reload_configuration()
+
+    elif command == "PRINT_LAYOUT":
+
+        print_keyboard_layout(value)
 
     else:
         print(
